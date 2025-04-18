@@ -1,0 +1,145 @@
+# Modèle classique de théorie des jeux avec deux états de la nature (LG coopératif ou conflictuel)
+# CG ajuste sa croyance à chaque interaction et réagit selon un seuil de défiance mu^*
+# LG conflictuel peut adopter une stratégie d'anticipation : coopérer temporairement pour faire baisser mu_t
+# Les deux joueurs intègrent une mémoire des trahisons/non-coopérations passées
+# LG évite de dévier s’il vient d’être puni et CG ne coopère pas s’il y a eu trahison récente
+# CG punit automatiquement si LG dévie et mu_t >= mu^*
+
+using Random
+using DataFrames
+using Plots
+using CSV
+
+# Paramètres du jeu
+total_periods = 30
+mu0 = 0.5           # croyance initiale: proba que LG est conflictuel
+mu_star = 0.7       # seuil de défiance au-delà duquel CG entre en conflit
+punish_duration = 3 # durée de la punition (si conflit)
+window_memory = 3   # taille de la mémoire glissante des comportements passés (5 ensuite)
+
+# Probas conditionnelles pour la mise à jour bayésienne
+p_coop_given_conflict = 0.2
+p_noncoop_given_conflict = 0.8
+p_coop = 0.5
+p_noncoop = 0.5
+
+# Initialisation
+Random.seed!(123)
+mu_t = mu0
+in_punishment = false
+punish_timer = 0
+recent_punishment = false
+
+# Contrôle stratégie LG conflictuel (anticipation)
+anticipation_mode = true
+coop_steps_for_deception = 3
+coop_counter = 0
+
+# Mémoire des actions LG et punition CG
+lg_memory = fill("coop", window_memory)
+cg_memory = fill("coop", window_memory)
+
+# DataFrame de sortie
+df = DataFrame(period=Int[], theta=Int[], lg_action=String[], cg_action=String[], mu=Float64[], phase=String[])
+
+for t in 1:total_periods
+    phase = "jeu normal"
+
+    # Tirage de l'état de la nature
+    theta = rand() < 0.5 ? 1 : 2
+
+    # LG choisit son action selon son type, l’anticipation, et mémoire punition
+    if theta == 1
+        lg_action = "coop"
+    elseif recent_punishment
+        lg_action = "coop"  # LG évite la déviation juste après une punition
+    elseif anticipation_mode && coop_counter < coop_steps_for_deception
+        lg_action = "coop"
+        coop_counter += 1
+    else
+        lg_action = rand() < 0.3 ? "coop" : "noncoop"
+    end
+
+    # Met à jour la mémoire LG
+    push!(lg_memory, lg_action)
+    if length(lg_memory) > window_memory
+        popfirst!(lg_memory)
+    end
+
+    # Score de défiance basé sur l’historique de LG
+    recent_noncoop = count(==("noncoop"), lg_memory)
+    defiance_score = recent_noncoop / window_memory
+
+    # Mise à jour de la croyance mu
+    if lg_action == "coop"
+        mu_t = (mu_t * p_coop_given_conflict) / p_coop
+    else
+        mu_t = (mu_t * p_noncoop_given_conflict) / p_noncoop
+    end
+    mu_t = clamp(mu_t + 0.3 * defiance_score, 0.0, 1.0)
+
+    # CG décide en tenant compte de l’historique
+    if in_punishment
+        cg_action = "punition"
+        phase = "punition"
+        punish_timer -= 1
+        if punish_timer == 0
+            in_punishment = false
+        end
+    elseif lg_action == "noncoop" && mu_t >= mu_star
+        cg_action = "conflit"
+        in_punishment = true
+        punish_timer = punish_duration
+        coop_counter = 0
+    elseif mu_t < mu_star && recent_noncoop == 0
+        cg_action = "coop"
+    else
+        cg_action = "prudence"
+    end
+
+    # Mise à jour mémoire CG
+    push!(cg_memory, cg_action)
+    if length(cg_memory) > window_memory
+        popfirst!(cg_memory)
+    end
+
+    recent_punishment = cg_action == "punition" || cg_action == "conflit"
+
+    push!(df, (t, theta, lg_action, cg_action, mu_t, phase))
+end
+
+# Export CSV
+dossier = "C:\\Cheick\\Thèse doctorale\\corpus"
+CSV.write(joinpath(dossier, "jeu_deux_etats.csv"), df)
+
+# Graphe
+plot(df.period, df.mu, label="μ_t (confiance CG)", lw=2, xlabel="Période", ylabel="μ_t", title="Évolution de la défiance (μ_t)", legend=:bottomright)
+hline!([mu_star], linestyle=:dash, label="Seuil μ*")
+for (i, row) in enumerate(eachrow(df))
+    if row.phase == "punition"
+        vspan!(row.period - 0.5, row.period + 0.5, color=:red, alpha=0.2, label=(i == 1 ? "Punition CG" : ""))
+    end
+end
+savefig(joinpath(dossier, "mu_t_jeu_deux_etats.png"))
+
+
+savefig(joinpath(dossier, "mu_t_jeu_deux_etats.png"))
+
+# === Nouvelle figure : représentation des actions de CG et LG ===
+# Encodage des actions pour affichage (couleur/position)
+actions_cg = Dict("coop" => 3, "prudence" => 2, "conflit" => 1, "punition" => 0)
+actions_lg = Dict("coop" => 1, "noncoop" => 0)
+
+cg_series = [actions_cg[row.cg_action] for row in eachrow(df)]
+lg_series = [actions_lg[row.lg_action] for row in eachrow(df)]
+
+# Plot des actions CG
+p = plot(df.period, cg_series, seriestype=:scatter, markersize=6, label="Action CG",
+         xticks=1:total_periods, yticks=(0:3, ["punition", "conflit", "prudence", "coop"]),
+         title="Actions du CG et LG au fil du temps", xlabel="Période", ylabel="Action CG")
+
+# Superposition des actions LG
+scatter!(p, df.period, lg_series, markershape=:diamond, markersize=6, label="Action LG",
+         markercolor=:black, legend=:bottomright)
+
+savefig(p, joinpath(dossier, "actions_cg_lg_temps.png"))
